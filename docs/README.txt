@@ -1,0 +1,1 @@
+The Getting Started Guide for Project #2 has been temporarily removed.  It will be posted to Content/Assignments/Project #2 once it has been verified for Vivado 2018.2

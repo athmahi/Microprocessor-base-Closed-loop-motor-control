@@ -41,19 +41,22 @@ We will be using the team project support in GitHub classroom for this assignmen
 
 2. The team member (first) who originally created the Project #2 group in D2L should log into their GitHub account and open the link to the Project #2 assignment in a new browser tab.   This will bring up a screen that allows him/her to either join an existing group or create a new group.
 
-3. That first team member should create a new group and name it like I named it in D2L (ex:  RoyK_MelihH).  You will likely be asked to join the ECE 5644 Spring 2019 organization since this is the first assignment that you are using GitHub for.  Follow the instructions (which typically involves clicking on a link in an email you receive) to join the organization).  You should only have to join the organization once for the term.
+3. That first team member should create a new group and name it like I named it in D2L (ex:  RoyK_MelihH).  You will likely be asked to join the ECE 544 Spring 2019 organization since this is the first assignment that you are using GitHub for.  Follow the instructions (which typically involves clicking on a link in an email you receive) to join the organization).  You should only have to join the organization once for the term.
 
 4. After receiving confirmation that the repository and group was created, the first team member should invite the 2nd team member to join the group.
 
-5. The second team member should log into their GitHub account and paste the assignment link into a new browser tab.  This will bring up a screen that allows you to either join an existing group or create a new group.  This time join your existing group.  As stated above, you will likely be asked to join the ECE 540 Winter 2019 organization if this is the first assignment you accept.
+5. The second team member should log into their GitHub account and paste the assignment link into a new browser tab.  This will bring up a screen that allows you to either join an existing group or create a new group.  This time join your existing group.  As stated above, you will likely be asked to join the ECE 544 Spring 2019 organization if this is the first assignment you accept.
 
  Please do not join a group that is not your own.  I set a limit of 2 members per team so if you join the "wrong" group before the 2nd member joins the group you will lock out the 2nd member of that group.
 
 6. The second member should get an email w/ their private Group repository for the project. You should both be good to go.
 
 7. Create your project(s) in Vivado.
+
 8. Develop your code, pushing to your private repository to GitHub following the guidelines for using version control with Vivado
+
 9. When you have finished the project, write your design report and include it in your repository along with any other deliverables that aren't in your Vivado project(s).
+
 10. Do a final push of your deliverables to the private repository for the project before the deadline.
 
 ## GitHub Deliverables

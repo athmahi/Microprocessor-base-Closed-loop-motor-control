@@ -38,14 +38,14 @@ module pid_embsys_wrapper
     sys_clock,
     usb_uart_rxd,
     usb_uart_txd,
-        JA,                                                // JA Connector- PMODOLED
-        JB,                                                // JB Connector- Unused
-        JC,                                                // JC Connector- HBridge
-        JD);   
+        JA,                                                // JA Connector
+        JB,                                                // JB Connector
+        JC,                                                // JC Connector
+    JD);   						   // JC Connector
   
-  inout	    [7:0] 		JA;	            // For connecting the PMODOLED
-  output    [7:0]       JB;                // JB Pmod connector Unused. Can be used for debugging purposes           
-  inout     [7:0]       JC;                // For connecting the Pmod HBridge
+  inout	    [7:0] 	JA;	           
+  output    [7:0]       JB;                
+  inout     [7:0]       JC;                
   inout     [7:0]       JD;
   output [7:0]an_0;
   input btnC_0;
@@ -184,21 +184,21 @@ module pid_embsys_wrapper
    
    
   ///////////////////////////// Assign Ports Jc[2:0] /////////////////////////////////// 
-    assign JC[0]=dir_0;                        // Direction 0/1 for the Drive Motor to spin Clockwise or AntiClockwise
-    assign JC[1]=pwm_0;                                 // Enable is the Port at which the Generated PWM Signal is given to
-    assign sa_input_0=JC[2];                                // SA_Input is th epin at which the Data from the Hall Sensor is read from.
+    assign JC[0]=dir_0;                        // Direction for the Drive Motor 
+    assign JC[1]=pwm_0;                        // Generated PWM Signal
+    assign sa_input_0=JC[2];                   // SA_Input is th epin at Data
    
 
    
     ////////////////////////// Assign Ports JD[3:0] to the Rotary ENcoder///////////////////
-    assign Pmod_out_0_pin1_io=JD[0];                      // SA
-    assign Pmod_out_0_pin2_io=JD[1];                      // SB
-    assign Pmod_out_0_pin3_io=JD[2];                      // BUTTTON
+    assign Pmod_out_0_pin1_io=JD[0];                      
+    assign Pmod_out_0_pin2_io=JD[1];                      
+    assign Pmod_out_0_pin3_io=JD[2];                      
     assign Pmod_out_0_pin4_io=JD[3]; 
     assign Pmod_out_0_pin7_io = JD[4];
     assign Pmod_out_0_pin8_io = JD[5];
     assign Pmod_out_0_pin9_io = JD[6];
-    assign Pmod_out_0_pin10_io = JD[7];                     // SWITCH
+    assign Pmod_out_0_pin10_io = JD[7];                     
     
   IOBUF PmodOLEDrgb_out_0_pin10_iobuf
        (.I(PmodOLEDrgb_out_0_pin10_o),

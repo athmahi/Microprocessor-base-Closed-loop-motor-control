@@ -1,13 +1,20 @@
-//@author Sai Bodanki
-
-
-//The application Demonstrates usage of Queues, Semaphores, Tasking model.
-
-//Application - Glow LED[7:0] for first interrupt and Glow LED[15:8] for next interrupt --> Repeat
-
-//Flow diagram
-// GPIO Interrupt (DIP Switch) --> ( ISR )Send a Semaphore --> Task 1 (Catch the Semaphore) -->
-// -->Task 1 - Send a Queue to Task -2 --> Task 2 Receive the queue --> Write to GPIO (LED)
+/*
+* @file software.c
+* @author Atharva Mahindrakar
+* @author Prasanna Kulkarni
+* @copyright Portland State University 2019
+*
+* This C file implments the PID control loop on Nexys4DDR4 board using FreeRTOS
+*
+* The flow of execution is as follows:
+* First the threads and messaging queues are created for input, display & PID functionalities. hardware peripherals are
+* are initialised and WDT timer interrupt is enabled. The schedular gets started when all initialisation processes are done.
+* The input thread is used to get PID inputs and target RPM from user with the help of rotary encoder, switches and push 
+* buttons. Message queues are sent from input thread to display thread to display PID parameters and the detected encoder
+* result of the motor on Oled display. In PID thread, pid handler function is used to perform PID calculations. The reference
+* of the declared struct is parsed to this function to get the PID parameters data. The returned PWM value is then assigned
+* to motors.
+*/
 
 
 /* FreeRTOS includes. */
@@ -38,6 +45,7 @@
 #include "xparameters.h"
 #include "xtmrctr.h"
 #include "Pmod_HB3.h"
+#include "xwdttb.h"
 
 #define mainQUEUE_LENGTH					( 1 )
 
@@ -80,54 +88,50 @@ static void input_thread( void *pvParameters );
 static void display_thread( void *pvParameters );
 static void pid_thread( void *pvParameters );
 
-/* The queue used by the queue send and queue receive tasks. */
-//static xQueueHandle xQueueDisplayRPM_Setpoint = 0;
-static xQueueHandle xQueueDisplayRPM = 0;
-static xQueueHandle xQueueDisplayKp  = 0;
-static xQueueHandle xQueueDisplayKi  = 0;
-static xQueueHandle xQueueDisplayKd  = 0;
-static xQueueHandle xQueueInput_PID	 = 0;
+static void watch_handler (void *pvUnused);
 
+/* The queue used by the queue send and queue receive tasks. */
+//static xQueueHandle Display_RPM_Setpoint = 0;
+static xQueueHandle Display_RPM = 0;
+static xQueueHandle Display_Kp  = 0;
+static xQueueHandle Display_Ki  = 0;
+static xQueueHandle Display_Kd  = 0;
+//static xQueueHandle xQueueInput_PID	 = 0;
+
+
+/**
+	Structure defination to store PID parameters so that they could be accessed in multiple 
+	threads
+*/
 
 typedef struct {
-
 	u8 Kp;
 	u8 Ki;
 	u8 Kd;
-
 	u16 current_rpm;
 	u16 target_rpm;
-
 	double error;
 	double prev_error;
 	double integral;
 	double derivative;
 
-	u32 rpm_counter;
-	//u32 led_value;			// Based on PID lit up LEDs
-
-}PIDControl;
+}PID_control;
 
 
 
 
+PmodOLEDrgb	pmodOLEDrgb_inst;			// PmodOLED instance
+PmodENC 	pmodENC_inst;				// PMOD ENCinstance
 
-//Create Instances
-//Function Declarations
-
-//Declare a Sempahore
-xSemaphoreHandle binary_sem;
-
-PmodOLEDrgb	pmodOLEDrgb_inst;
-PmodENC 	pmodENC_inst;
-
-XTmrCtr		AXITimerInst;
+XTmrCtr		AXITimerInst;				// AXI timer instance
 XIntc 		IntrptCtlrInst;				// Interrupt Controller instance
 
 
-xSemaphoreHandle xPID = 0;
+xSemaphoreHandle bin_sem = 0;				// semaphore declaration
 
-PIDControl PID, Input;
+PID_control PID, Input;					// PID instance
+
+XWdtTb watch_dog;						//Watch dog timer instance
 
 int main(void)
 {
@@ -135,7 +139,7 @@ int main(void)
 	uint32_t sts;
 
 
-	sts = do_init();
+	sts = do_init();					// hardware initialisation
 	if (XST_SUCCESS != sts)
 	{
 		exit(1);
@@ -144,47 +148,42 @@ int main(void)
 	xil_printf("Hello from FreeRTOS Example\r\n");
 	init_display();
 
+	
+	Display_RPM	= xQueueCreate( mainQUEUE_LENGTH, sizeof( int ) );		// Queue declaration
+	Display_Kp  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
+	Display_Ki  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
+	Display_Kd  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
+	
+	
+	configASSERT(Display_RPM);			// config assert for queues
+	configASSERT( Display_Kp );
+	configASSERT( Display_Ki );
+	configASSERT( Display_Kd );
 
+										//Create Semaphore
+	vSemaphoreCreateBinary( bin_sem );
 
-
-	/* Create the queue */
-	//xQueueDisplayRPM_Setpoint = xQueueCreate( mainQUEUE_LENGTH, sizeof( int ) );
-	xQueueDisplayRPM	  = xQueueCreate( mainQUEUE_LENGTH, sizeof( int ) );
-	xQueueDisplayKp  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
-	xQueueDisplayKi  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
-	xQueueDisplayKd  = xQueueCreate( mainQUEUE_LENGTH, sizeof( u8 ) );
-	//xQueueInput_PID  =
-
-	/* Sanity check that the queue was created. */
-	//configASSERT( xQueueDisplayRPM_Setpoint );
-	configASSERT(xQueueDisplayRPM);
-	configASSERT( xQueueDisplayKp );
-	configASSERT( xQueueDisplayKi );
-	configASSERT( xQueueDisplayKd );
-
-	//Create Semaphore
-	vSemaphoreCreateBinary( xPID );
-
-	xTaskCreate( input_thread,
+	xTaskCreate( input_thread,				// initialise thread input_thread
 		   ( const char * ) "IT",
 							2048,
 							NULL,
-							1,
+							1,				// priority 1
 							NULL );
 
-	xTaskCreate( display_thread,
+	xTaskCreate( display_thread,			// initialise display input_thread
 		   ( const char * ) "DT",
 							2048,
 							NULL,
-							2,
+							2,				// priority 2
 							NULL );
 
-	xTaskCreate( pid_thread,
+	xTaskCreate( pid_thread,				// initialise thread pid_thread
 		   ( const char * ) "PT",
 							2048,
 							NULL,
-							1,
+							1,				// priority1
 							NULL );
+	NX4IO_setLEDs(0x0);						// clear LEDs
 
 	xil_printf("starting scheduler **********\n");
 	vTaskStartScheduler();
@@ -192,6 +191,15 @@ int main(void)
 	return 0;
 }
 
+
+
+/**
+*	In this thread inputs from switches, PmodENC & push buttons
+*	are read and accordingly the increment / decrement operation
+*	on input PID parameters is perfomed
+*	Also from our custom PmodHB3 driver,  encoder input is read
+*	and used forclose  loop control.
+*/
 
 
 void input_thread( void *pvParameters ) {
@@ -218,84 +226,76 @@ void input_thread( void *pvParameters ) {
 
 	int pid_out = 0;
 
+	u16 enc_switch = 0;
+	u16 enc_switch_state = 0;
+	u16 enc_switch_laststate = 0;
 
 
-
-
-	// get the previous state
 	while(1)
 	{
 
-		/*xil_printf(" In thread input_thread \n");
-		PID.Kp = tempKp;
-		PID.Ki = tempKi;
-		PID.Kd = tempKd;
-
-		tempKp++;
-		tempKi++;
-		tempKd++;
-
-		if(!xQueueSend( xQueueDisplayKp, &PID.Kp, portMAX_DELAY ))
-		{
-			xil_printf("Failed to send message to DISPLAY THREAD \n");
-		}*/
-
+		
 		SWITCH_IN = NX4IO_getSwitches();	// read switch input
 
+		NX4IO_setLEDs(SWITCH_IN);			// set LEDs depending upon input Switch data
 
 
-		if((SWITCH_IN & 0X0030) == 0X00)
+
+		if((SWITCH_IN & 0X0030) == 0X00)		// if SW[5:4] == 0
 		{
-			pid_incr = 1;
+			pid_incr = 1;						// sclale is 1
 		}
 
-		else if((SWITCH_IN & 0X0030) == 0x0010)
+		else if((SWITCH_IN & 0X0030) == 0x0010)	// if SW[5:4] == 0x01
 		{
-			pid_incr = 5;
+			pid_incr = 5;						// scale is 5
 		}
 
-		else if ((SWITCH_IN & 0X0030) >= 0x0020)
+		else if ((SWITCH_IN & 0X0030) >= 0x0020)	// if SW[5:4] == 0x1x
 		{
-			pid_incr = 10;
+			pid_incr = 10;							// scale is 5
 		}
 
 
 
 		if((SWITCH_IN & 0x000C)==(0x0008|0x000C))
-		{      													//Check if switches[3:2] are 10 or 11
-			pid_param = 1;        								//Update the value of proportional constant kp
+		{      											//SW[3:2] = 0x1x
+			pid_param = 1;        						//update Kp
 		}
-		else if((SWITCH_IN & 0x000C)==0x0004)
-		{         												//Check if switches[3:2] are 01
-			pid_param = 2;           							//Update the value of integral constant ki
+		else if((SWITCH_IN & 0x000C)==0x0004)			//SW[3:2] = 0x01
+		{         										
+			pid_param = 2;           					//Update  ki
 		}
-		else if((SWITCH_IN & 0x000C)==0x0000)
-		{          												//Check if switches[3:2] are 00
-			pid_param = 3;        								//Update the value of derivative constant kd
+		else if((SWITCH_IN & 0x000C)==0x0000)			//SW[3:2] = 0x1x
+		{          										
+			pid_param = 3;        						//Update kd
 		}
 
 
 
-		if((SWITCH_IN & 0X0003) == 0X00)
+		if((SWITCH_IN & 0X0003) == 0X00)				// SW[3:2] = 0
 		{
-			rpm_incr = 1;
+			rpm_incr = 1;								// incr = 1
 		}
 
-		else if((SWITCH_IN & 0X0003) == 0x0001)
+		else if((SWITCH_IN & 0X0003) == 0x0001)			// SW[3:2] = 0x01
 		{
-			rpm_incr = 5;
+			rpm_incr = 5;								// incr = 5
 		}
 
-		else if ((SWITCH_IN & 0X0003) >= 0x0002)
+		else if ((SWITCH_IN & 0X0003) >= 0x0002)		// SW[3:2] = 0x1x
 		{
-			rpm_incr = 100;
+			rpm_incr = 10;								// incr = 10
 		}
 
-		state = ENC_getState(&pmodENC_inst);
+		state = ENC_getState(&pmodENC_inst);			// ENC encoder input
 
 		ticks = ENC_getRotation(state, laststate);
 
-		if(ticks == 1)								//If new ticks is greater than old ticks
+		enc_switch_state = ENC_switchOn(state);
+
+
+		if(ticks == 1)								
 		{
 			PID.target_rpm = PID.target_rpm + rpm_incr;						// increase the speed
 
@@ -317,7 +317,7 @@ void input_thread( void *pvParameters ) {
 		}
 
 
-		if (NX4IO_isPressed(BTNU))
+		if (NX4IO_isPressed(BTNU))						// increment PID parameters
 		{
 			if(pid_param==1)
 				PID.Kp = PID.Kp + pid_incr;
@@ -330,7 +330,7 @@ void input_thread( void *pvParameters ) {
 
 		}
 
-		if (NX4IO_isPressed(BTND))
+		if (NX4IO_isPressed(BTND))						// Decrement PID parameters
 		{
 			if(pid_param==1)
 				PID.Kp = PID.Kp - pid_incr;
@@ -343,85 +343,72 @@ void input_thread( void *pvParameters ) {
 
 		}
 
-		if (NX4IO_isPressed(BTNC))
+		if (NX4IO_isPressed(BTNC))						// resets PID parameters
 		{
-			PID.Kp = 0;
+			PID.Kp = 0;								
 			PID.Ki = 0;
 			PID.Kd = 0;
 			PID.target_rpm = 0;
+			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, 0);
 		}
 
 		NX4IO_SSEG_putU32Dec(PID.target_rpm, 1);
 
-		tempTargetRPM = PID.target_rpm * 2047/999;
+		tempTargetRPM = PID.target_rpm * 2047/999;						//scale the RPM to 10 bit value 
 
-		PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 4, 1);
+		//PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 4, 0);					// give 
 		//PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, tempTargetRPM);
-		RPM_detect = PMOD_HB3_mReadReg(PMODHB3_BASEADDR, 8);
+		RPM_detect = PMOD_HB3_mReadReg(PMODHB3_BASEADDR, 8);			// read encoder input from	
+
 
 		PID.current_rpm = RPM_detect;
 
-		if(!xQueueSend( xQueueDisplayKp, &PID.Kp, portMAX_DELAY ))
+		if(!xQueueSend( Display_Kp, &PID.Kp, portMAX_DELAY ))			// send PID data to display thread
 		{
 			xil_printf("Failed to send message to DISPLAY THREAD \n");
 		}
 
-		if(!xQueueSend( xQueueDisplayKi, &PID.Ki, portMAX_DELAY ))
+		if(!xQueueSend( Display_Ki, &PID.Ki, portMAX_DELAY ))			// send PID data to display thread
 		{
 			xil_printf("Failed to send message to DISPLAY THREAD \n");
 		}
 
-		if(!xQueueSend( xQueueDisplayKd, &PID.Kd, portMAX_DELAY ))
+		if(!xQueueSend( Display_Kd, &PID.Kd, portMAX_DELAY ))			// send PID data to display thread
 		{
 			xil_printf("Failed to send message to DISPLAY THREAD \n");
 		}
 
-		if(!xQueueSend( xQueueDisplayRPM, &RPM_detect, portMAX_DELAY ))
+		if(!xQueueSend( Display_RPM, &RPM_detect, portMAX_DELAY ))		// send PID data to display thread
 		{
 			xil_printf("Failed to send message to DISPLAY THREAD \n");
 		}
 
 
-		/*error = PID.target_rpm - RPM_detect;
 
-		differential = error - prev_error;
+		if(enc_switch_state != enc_switch_laststate)					// if enc switch is flipped
+		{
+			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, 0);				// switch off the motor
+			//xil_printf("\n\n ENC switch flipped\n\n");
+		}
 
-
-
-		if(error < (PID.target_rpm / 10))
-			integral += error;
-		else
-			integral = 0;
-
-
-
-		pid_out = (PID.Kp * error) + (PID.Ki * integral) + (PID.Kd * differential);
-
-		pid_out = 200 + pid_out/100;
-
-		if(differential != 0)
-			xil_printf("\n**********************\n");
-
-
-		xil_printf("\n\n\t\t PID - %d error - %d	%d \n\n", pid_out, error, integral );
-
-
-		//OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 7, 7);
-		//PMDIO_putnum(&pmodOLEDrgb_inst, pid_out, 10);*/
-
-
-
+		if(enc_switch_state == 1 )								// if enc switchis on
+			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 4, 0);			// rotate motor clockwise
+		else if(enc_switch_state == 0 )							// if enc switch if off
+			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 4, 1);			// rotate motor anti clockwise
 
 		laststate = state;
 		lastticks = ticks;
-		prev_error = error;
+
+		enc_switch_laststate = enc_switch_state;
 
 		vTaskDelay(3);
 
 	}
 }
 
-
+/**
+	In display thread, simply data sent from input thread is displayed over PmodOled display
+*/
 
 void display_thread( void *pvParameters )
 {
@@ -429,64 +416,76 @@ void display_thread( void *pvParameters )
 	u8 tempKi = 0;
 	u8 tempKd = 0;
 	u32 tempRPM_detect = 0;
+	u32 temprprp = 0;
 
 	while(1)
 	{
 
 		//xil_printf(" In thread display_thread \n");
-		if( xQueueReceive( xQueueDisplayKp, &tempKp, mainDONT_BLOCK ) )
+		if( xQueueReceive( Display_Kp, &tempKp, mainDONT_BLOCK ) )
 		{
 			//xil_printf("data recetved of Kp - %d \n", tempKp);
 		}
 
-		if( xQueueReceive( xQueueDisplayKi, &tempKi, mainDONT_BLOCK ) )
+		if( xQueueReceive( Display_Ki, &tempKi, mainDONT_BLOCK ) )
 		{
 			//xil_printf("data recetved of Ki - %d \n", tempKi);
 		}
 
-		if( xQueueReceive( xQueueDisplayKd, &tempKd, mainDONT_BLOCK ) )
+		if( xQueueReceive( Display_Kd, &tempKd, mainDONT_BLOCK ) )
 		{
 			//xil_printf("data recetved of Kd - %d \n", tempKd);
 		}
 
-		if( xQueueReceive( xQueueDisplayRPM, &tempRPM_detect, mainDONT_BLOCK ) )
+		if( xQueueReceive( Display_RPM, &tempRPM_detect, mainDONT_BLOCK ) )
 		{
 			//xil_printf("         data recetved of RPM - %d \n", tempRPM_detect);
 		}
 
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 1);
+		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 1);				// Display the kp data
 		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 1);
 		PMDIO_putnum(&pmodOLEDrgb_inst, tempKp, 10);
 
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 3);
+		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 3);				// Display the Ki data
 		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 3);
 		PMDIO_putnum(&pmodOLEDrgb_inst, tempKi, 10);
 
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 5);
+		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 5);				// Display the Kd data
 		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 5);
 		PMDIO_putnum(&pmodOLEDrgb_inst, tempKd, 10);
 
 
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
+		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);				// Display detected RPM
 		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
 		PMDIO_putnum(&pmodOLEDrgb_inst, tempRPM_detect, 10);
 
-
+		/*if(tempRPM_detect == 0)
+			temprprp = tempRPM_detect;
+		else
+			temprprp = tempRPM_detect + 30;
 
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
 		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
 		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
-		PMDIO_putnum(&pmodOLEDrgb_inst, tempRPM_detect, 10);
+		PMDIO_putnum(&pmodOLEDrgb_inst, temprprp, 10);*/
 
 		vTaskDelay(3);
 
 	}
 }
 
+/**
+    In this thread waits untill all the PID parameters are zero. if one of the 
+    parameter changes then it calls PID handler function to which an reference
+    of the PID struct is sent. That function returns the target pwm value at which motor
+    shou;d run. That value is then writen on the PmodHB3's register which generates 
+    PWM
+
+*/
 
 void pid_thread( void *pvParameters )
 {
@@ -496,32 +495,16 @@ void pid_thread( void *pvParameters )
 	while(1)
 	{
 		target_speed = PID.target_rpm;
-		//xil_printf(" target_rpm - %d \n\n", target_speed);
 
 		if(PID.Kd == 0 && PID.Ki == 0 && PID.Kp == 0)
 		{
 			// Do nothing yet
-			//pid_speed = pid_handler(&PID, target_speed);
 		}
 
 		else
 		{
-			//if(PID.error>= 10 || PID.error<= -10 )
-				pid_speed = pid_handler(&PID, target_speed);
-
-			//pid_speed =(int) ((double) pid_speed * (double) 1.5);
-
-			//xil_printf("\n\n PID PWM is %d \n\n", pid_speed);
-
-			/*if(pid_speed > 2047)
-				pid_speed = 2047;*/
-
-
-
-			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, pid_speed);
-
-			// update motor speed
-			//pid_handler();
+			pid_speed = pid_handler(&PID, target_speed);                // get the target PWM value
+			PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, pid_speed);        // write the value to Pmod IP
 		}
 
 		vTaskDelay(5);
@@ -540,48 +523,76 @@ int pid_handler (PIDControl *pid, int target_speed)
 	double tempKi = 0;
 	double tempKd = 0;
 
+	int current_rpm_dummy = 0;
+
 	//pid->target_rpm = target_speed;
 
-	error = target_speed - pid->current_rpm ;
+	error = target_speed - pid->current_rpm ;           // calculate error
 
-	pid->derivative = error - pid->prev_error;
-
-
+	pid->derivative = error - pid->prev_error;          // calculate derivative
 
 
-	pid->integral = pid->integral + error;
 
-	pid->error = error;
 
-	//else
-	//	pid->integral = 0;
+	pid->integral = pid->integral + error;              // calculate the integral
 
-	if(pid->integral > 1000)
-		pid->integral = 1000;
+	pid->error = error;                                 // assign current error to previous error
 
-	if(pid->integral <-1000)
-		pid->integral = -1000;
 
-	tempKp = (double)pid->Kp / (double)255;
-	tempKi = (double)pid->Ki / (double)255;
+	if(pid->integral > 1075)                            // bound the integral error to -1075 to 1075
+		pid->integral = 1075;
+
+	if(pid->integral <-1075)
+		pid->integral = -1075;
+
+	tempKp = (double)pid->Kp / (double)255;             // scale down the PID parameters from 8 bits to
+	tempKi = (double)pid->Ki / (double)255;             // floating 0-1 scale
 	tempKd = (double)pid->Kd / (double)255;
 
+    // calculate target PWM
 	out_pwm = offset + (int) (( tempKp *1.4*pid->error ) + (tempKi * pid->integral ) + ( tempKd  * pid->derivative ));
 
 
 
 
 	if (out_pwm < 0)
-		out_pwm = -(out_pwm);
-	xil_printf("\n\n PID target	%d	Current %d	Errors  %d Integra %d PID PWM %d \n\n",target_speed,pid->current_rpm, (int)pid->error,(int) pid->integral, out_pwm);
+		out_pwm = -(out_pwm);                          // handle -ve results
 
-	pid->prev_error = pid->error;
+	current_rpm_dummy = pid->current_rpm;
 
-	return out_pwm;
+	xil_printf("%d,%d\n",target_speed, current_rpm_dummy);
+
+	pid->prev_error = pid->error;                       // assign the current error to previous error
+
+	return out_pwm;                                        // return the calculated PWM
 
 }
 
 
+
+
+/*********************** DISPLAY-RELATED FUNCTIONS ***********************************/
+
+/****************************************************************************/
+/**
+* Converts an integer to ASCII characters
+*
+* algorithm borrowed from ReactOS system libraries
+*
+* Converts an integer to ASCII in the specified base.  Assumes string[] is
+* long enough to hold the result plus the terminating null
+*
+* @param 	value is the integer to convert
+* @param 	*string is a pointer to a buffer large enough to hold the converted number plus
+*  			the terminating null
+* @param	radix is the base to use in conversion, 
+*
+* @return  *NONE*
+*
+* @note
+* No size check is done on the return string size.  Make sure you leave room
+* for the full string plus the terminating null in string
+*****************************************************************************/
 
 void PMDIO_itoa(int32_t value, char *string, int32_t radix)
 {
@@ -642,32 +653,38 @@ void PMDIO_putnum(PmodOLEDrgb* InstancePtr, int32_t num, int32_t radix)
 
   return;
 }
+
+
+/****************************************************************************/
+/**
+* initialize the system
+*
+* This function is executed once at start-up and after resets.  It initializes
+* the peripherals and registers the interrupt handler(s)
+*****************************************************************************/
+
+
 int	 do_init(void)
 {
 	uint32_t status, status_1, status_2, status_3 ;				// status from Xilinx Lib calls
 
 	// initialize the Nexys4 driver and (some of)the devices
-	status = (uint32_t) NX4IO_initialize(NX4IO_BASEADDR);
+	status = (uint32_t) NX4IO_initialize(NX4IO_BASEADDR);       // initialise NX4IO
 	if (status != XST_SUCCESS)
 	{
 		return XST_FAILURE;
 	}
 
-	// set all of the display digits to blanks and turn off
-	// the decimal points using the "raw" set functions.
-	// These registers are formatted according to the spec
-	// and should remain unchanged when written to Nexys4IO...
-	// something else to check w/ the debugger when we bring the
-	// drivers up for the first time
+	
 	NX4IO_SSEG_setSSEG_DATA(SSEGHI, 0x0058E30E);
 	NX4IO_SSEG_setSSEG_DATA(SSEGLO, 0x00144116);
 
-	OLEDrgb_begin(&pmodOLEDrgb_inst, RGBDSPLY_GPIO_BASEADDR, RGBDSPLY_SPI_BASEADDR);
+	OLEDrgb_begin(&pmodOLEDrgb_inst, RGBDSPLY_GPIO_BASEADDR, RGBDSPLY_SPI_BASEADDR);    // initialise pmodOled display
 
 	// initialize the pmodENC and hardware
-	ENC_begin(&pmodENC_inst, PMODENC_BASEADDR);
+	ENC_begin(&pmodENC_inst, PMODENC_BASEADDR);                 // initialise pmod ENC module
 
-	status = AXI_Timer1_initialize();
+	status = AXI_Timer1_initialize();                           // initialise AXI timer 1
 	if (status != XST_SUCCESS)
 	{
 		return XST_FAILURE;
@@ -675,22 +692,30 @@ int	 do_init(void)
 
 	xil_printf("\n\n****** AXI timer 1 initialised\n\n****");
 
-	/*status = XIntc_Initialize(&IntrptCtlrInst, INTC_DEVICE_ID);
-	if (status != XST_SUCCESS)
-	{
-	   return XST_FAILURE;
-	}
 
-	status = XIntc_Start(&IntrptCtlrInst, XIN_REAL_MODE);
-	if (status != XST_SUCCESS)
-	{
-		return XST_FAILURE;
-	}*/
+	XWdtTb_Config *config;                                      // instantiate watchdog timer
+
+	config = XWdtTb_LookupConfig(XPAR_WDTTB_0_DEVICE_ID);       // configure WDT
+
+	XWdtTb_CfgInitialize(&watch_dog, config, config->BaseAddr);     // configure WDT
+
+	XWdtTb_ProgramWDTWidth(&watch_dog, 100);                    // set 32 bit WDT count
+
+    // intialise the WDT handler
+	xPortInstallInterruptHandler(XPAR_MICROBLAZE_0_AXI_INTC_AXI_TIMEBASE_WDT_0_WDT_INTERRUPT_INTR,watch_handler, NULL);
+
+	vPortEnableInterrupt(XPAR_MICROBLAZE_0_AXI_INTC_AXI_TIMEBASE_WDT_0_WDT_INTERRUPT_INTR); // enable WDt interruot
+
+	XWdtTb_Start(&watch_dog);                                   // start WDT
 
 
 	return XST_SUCCESS;
 }
 
+/*
+ * AXI timer initializes it to generate out a 4Khz signal, Which is given to the Nexys4IO module as clock input.
+ * DO NOT MODIFY
+ */
 
 int AXI_Timer1_initialize(void){
 
@@ -725,6 +750,9 @@ int AXI_Timer1_initialize(void){
 	return XST_SUCCESS;
 }
 
+/**
+    Sets the PID parameter variable names on left edge of the display
+*/
 
 void init_display()
 {
@@ -748,64 +776,32 @@ void init_display()
 	//NX410_SSEG_setAllDigits(SSEGHI, CC_0, CC_0, CC_0, CC_0, DP_NONE);
 }
 
-
-
-/*void pid_thread( void  )
+/**
+    This handler gets called every time WDt interrupt occurs. 
+*/
+void watch_handler (void *pvUnused)
 {
-	int i = 0;
-	u8 tempKp = 0;
-	u8 tempKi = 0;
-	u8 tempKd = 0;
-	u32 temp_current_rpm = 0;
-	u32 temp_target_rpm = 0;
+	int sw_in = 0;
 
-	double temp_error;
-	double temp_prev_error;
-	double temp_integral;
-	double temp_derivative;
+	sw_in = NX4IO_getSwitches();        // reads switch inputs
 
+	
+	if(sw_in == 32768)                  // checks the condition of whether sw[15] is on or off
+	{
+		OLEDrgb_Clear(&pmodOLEDrgb_inst);
+        OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 0, 3);
+		xil_printf(" \n\n CRRASHED !!!!!!!!!!!!!\n");
+		OLEDrgb_PutString(&pmodOLEDrgb_inst,"CRASHED ! ! !");       // display crash message on Oled display
+		NX4IO_setLEDs(0xff0f);                                      // sets LEDs
+		vTaskEndScheduler();                                        // ends schedular
+	}
 
+	else
+	{
+		XWdtTb_RestartWdt(&watch_dog);              // restarts WDT
+	}
 
-		PID.error = PID.target_rpm - PID.current_rpm;
-
-		temp_derivative = PID.error - PID.prev_error;
-		PID.derivative = temp_derivative;
-		PID.prev_error = PID.error;
-
-		if(PID.error < (PID.target_rpm/10))
-		{
-			PID.integral = PID.integral + PID.error;
-		}
-		else
-			PID.integral = 0;
-
-		PID.target_rpm = (int) ((PID.Kp * PID.error) + (PID.integral * PID.integral) + (PID.Kd * PID.derivative));
-
-		temp_target_rpm = PID.target_rpm * 2047/999;
-		PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 4, 1);
-		PMOD_HB3_mWriteReg(PMODHB3_BASEADDR, 12, PID.target_rpm);
-		xil_printf("set PWM is - %d\n", PID.target_rpm);
-
-
+	sw_in = 0;
 }
 
-OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 1);
-		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 1);
-		PMDIO_putnum(&pmodOLEDrgb_inst, tempKp, 10);
 
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 3);
-		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 3);
-		PMDIO_putnum(&pmodOLEDrgb_inst, tempKi, 10);
-
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 5);
-		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 5);
-		PMDIO_putnum(&pmodOLEDrgb_inst, tempKd, 10);
-
-
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
-		OLEDrgb_PutString(&pmodOLEDrgb_inst,"      ");
-		OLEDrgb_SetCursor(&pmodOLEDrgb_inst, 5, 7);
-		PMDIO_putnum(&pmodOLEDrgb_inst, tempRPM_detect, 10);*/
